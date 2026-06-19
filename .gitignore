@@ -1,0 +1,7 @@
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+shared/__pycache__/
+dashboard/backend/__pycache__/
+__pycache__/
+*.pyc
+.env 
