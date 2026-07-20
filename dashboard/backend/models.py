@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -28,6 +28,7 @@ class Layer(Base):
     id = Column(Integer, primary_key=True, index=True)
     run_id = Column(Integer, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     layer_name = Column(String(100), nullable=False)
+    feature_group = Column(String(100))
     status = Column(String(10), nullable=False)
     passed = Column(Integer, default=0)
     failed = Column(Integer, default=0)
@@ -49,5 +50,12 @@ class TestCase(Base):
     latency_seconds = Column(Float)
     error_message = Column(Text)
     failure_category = Column(String(50))
+    category = Column(String(50), default="contract")
+    feature_group = Column(String(100))
+    routing_pass = Column(Boolean)
+    source_attribution_pass = Column(Boolean)
+    source_url_pass = Column(Boolean)
+    disclaimer_pass = Column(Boolean)
+    latency_flag = Column(String(20))
 
     layer = relationship("Layer", back_populates="test_cases")

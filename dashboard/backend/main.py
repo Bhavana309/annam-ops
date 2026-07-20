@@ -5,12 +5,22 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
 from database import Base, engine, get_db
 from models import Layer, Run, TestCase
 
-APP_NAMES = ["AjraSakha", "Reviewer System", "Web App", "KCC Agent", "Outreach"]
+APP_NAMES = ["AjraSakha", "Reviewer System", "Web App", "Agents Call Centre", "Outreach", "Questions Collection"]
+LEGACY_ACC_AGENT_NAME = "KCC" + " Agent"
+LEGACY_AGENTS_CALL_CENTRE_NAME = "ACC" + " Agent"
+APP_NAME_ALIASES = {
+    LEGACY_ACC_AGENT_NAME: "Agents Call Centre",
+    LEGACY_AGENTS_CALL_CENTRE_NAME: "Agents Call Centre",
+    "Agents Call Centre": "Agents Call Centre",
+    "questions_collection": "Questions Collection",
+    "Questions Collection": "Questions Collection",
+}
 
 app = FastAPI(title="ACE Test Observability Dashboard")
 
@@ -23,6 +33,10 @@ app.add_middleware(
 )
 
 
+def canonical_app_name(app_name: str) -> str:
+    return APP_NAME_ALIASES.get(app_name, app_name)
+
+
 class TestCaseIn(BaseModel):
     name: str
     service: Optional[str] = None
@@ -31,10 +45,18 @@ class TestCaseIn(BaseModel):
     latency_seconds: Optional[float] = None
     error_message: Optional[str] = ""
     failure_category: Optional[str] = None
+    category: Optional[str] = None
+    feature_group: Optional[str] = None
+    routing_pass: Optional[bool] = None
+    source_attribution_pass: Optional[bool] = None
+    source_url_pass: Optional[bool] = None
+    disclaimer_pass: Optional[bool] = None
+    latency_flag: Optional[str] = None
 
 
 class LayerIn(BaseModel):
     layer_name: str
+    feature_group: Optional[str] = None
     status: str
     passed: int = 0
     failed: int = 0
@@ -65,6 +87,13 @@ def serialize_test_case(test_case: TestCase):
         "latency_seconds": test_case.latency_seconds,
         "error_message": test_case.error_message,
         "failure_category": test_case.failure_category,
+        "category": test_case.category if test_case.category else None,
+        "feature_group": test_case.feature_group,
+        "routing_pass": test_case.routing_pass,
+        "source_attribution_pass": test_case.source_attribution_pass,
+        "source_url_pass": test_case.source_url_pass,
+        "disclaimer_pass": test_case.disclaimer_pass,
+        "latency_flag": test_case.latency_flag,
     }
 
 
@@ -72,6 +101,7 @@ def serialize_layer(layer: Layer, include_cases: bool = True):
     payload = {
         "id": layer.id,
         "layer_name": layer.layer_name,
+        "feature_group": layer.feature_group,
         "status": layer.status,
         "passed": layer.passed,
         "failed": layer.failed,
@@ -109,6 +139,18 @@ def create_tables():
     for attempt in range(12):
         try:
             Base.metadata.create_all(bind=engine)
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'contract'"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS feature_group VARCHAR(100)"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS routing_pass BOOLEAN"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS source_attribution_pass BOOLEAN"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS source_url_pass BOOLEAN"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS disclaimer_pass BOOLEAN"))
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN IF NOT EXISTS latency_flag VARCHAR(20)"))
+                connection.execute(text("ALTER TABLE layers ADD COLUMN IF NOT EXISTS feature_group VARCHAR(100)"))
+                connection.execute(text("UPDATE test_cases SET category = 'contract' WHERE category IS NULL"))
+                connection.execute(text("UPDATE runs SET app_name = :new_name WHERE app_name = :old_name"), {"new_name": "Agents Call Centre", "old_name": LEGACY_ACC_AGENT_NAME})
+                connection.execute(text("UPDATE runs SET app_name = :new_name WHERE app_name = :old_name"), {"new_name": "Agents Call Centre", "old_name": LEGACY_AGENTS_CALL_CENTRE_NAME})
             return
         except Exception:
             if attempt == 11:
@@ -124,7 +166,7 @@ def health():
 @app.post("/api/runs")
 def create_run(payload: RunIn, db: Session = Depends(get_db)):
     run = Run(
-        app_name=payload.app_name,
+        app_name=canonical_app_name(payload.app_name),
         timestamp=payload.timestamp,
         triggered_by=payload.triggered_by,
         git_commit=payload.git_commit,
@@ -137,6 +179,7 @@ def create_run(payload: RunIn, db: Session = Depends(get_db)):
     for layer_payload in payload.layers:
         layer = Layer(
             layer_name=layer_payload.layer_name,
+            feature_group=layer_payload.feature_group,
             status=layer_payload.status,
             passed=layer_payload.passed,
             failed=layer_payload.failed,
@@ -199,23 +242,34 @@ def get_apps(db: Session = Depends(get_db)):
 
 @app.get("/api/apps/{app_name}/runs")
 def get_app_runs(app_name: str, db: Session = Depends(get_db)):
+    app_name = canonical_app_name(app_name)
     runs = (
         db.query(Run)
         .options(joinedload(Run.layers))
         .filter(Run.app_name == app_name)
         .order_by(Run.timestamp.desc(), Run.id.desc())
-        .limit(10)
         .all()
     )
     return [serialize_run(run, include_cases=False) for run in runs]
 
 
-@app.get("/api/runs/{run_id}")
-def get_run(run_id: int, db: Session = Depends(get_db)):
+@app.get("/api/runs/{run_identifier}")
+def get_run_or_app_runs(run_identifier: str, db: Session = Depends(get_db)):
+    if not run_identifier.isdigit():
+        run_identifier = canonical_app_name(run_identifier)
+        runs = (
+            db.query(Run)
+            .options(joinedload(Run.layers))
+            .filter(Run.app_name == run_identifier)
+            .order_by(Run.timestamp.desc(), Run.id.desc())
+            .all()
+        )
+        return [serialize_run(run, include_cases=False) for run in runs]
+
     run = (
         db.query(Run)
         .options(joinedload(Run.layers).joinedload(Layer.test_cases))
-        .filter(Run.id == run_id)
+        .filter(Run.id == int(run_identifier))
         .first()
     )
     if not run:
@@ -225,6 +279,7 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
 
 @app.get("/api/apps/{app_name}/trend")
 def get_trend(app_name: str, db: Session = Depends(get_db)):
+    app_name = canonical_app_name(app_name)
     runs = (
         db.query(Run)
         .filter(Run.app_name == app_name)
